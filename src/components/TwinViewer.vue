@@ -4,25 +4,26 @@
 
 <script setup lang="ts">
 import {
+  Axis,
   Cartesian2,
   Cartesian3,
+  Cesium3DTileFeature,
+  Cesium3DTileColorBlendMode,
+  Cesium3DTileset,
   Color,
-  ColorBlendMode,
   EllipsoidTerrainProvider,
   HeadingPitchRange,
-  Matrix4,
-  Model,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   Transforms,
   Viewer
 } from 'cesium'
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { onBeforeUnmount, onMounted, shallowRef, watch } from 'vue'
 import type { ModelNodeItem } from '../types/model'
-import { createMeshPicker, type MeshPicker } from '../utils/meshPicker'
 
 const props = defineProps<{
-  modelUrl: string
+  tilesetUrl: string
+  modelUrl?: string
   nodes: ModelNodeItem[]
   selectedNodeId: string | null
   hoveredNodeId: string | null
@@ -37,16 +38,14 @@ const emit = defineEmits<{
   (event: 'error', message: string): void
 }>()
 
-const containerRef = ref<HTMLDivElement | null>(null)
+const containerRef = shallowRef<HTMLDivElement | null>(null)
 const viewerRef = shallowRef<Viewer | null>(null)
-const mainModelRef = shallowRef<Model | null>(null)
-const highlightModelRef = shallowRef<Model | null>(null)
-const transparentModelRef = shallowRef<Model | null>(null)
+const tilesetRef = shallowRef<Cesium3DTileset | null>(null)
 const handlerRef = shallowRef<ScreenSpaceEventHandler | null>(null)
-const meshPickerRef = shallowRef<MeshPicker | null>(null)
-const modelMatrixRef = shallowRef<Matrix4 | null>(null)
+
 let removeCanvasLeaveListener: (() => void) | null = null
-let meshPickerPromise: Promise<MeshPicker> | null = null
+let removeTileVisibleListener: (() => void) | null = null
+let removeTileUnloadListener: (() => void) | null = null
 let hoverFrameId = 0
 let pendingHoverPosition: Cartesian2 | null = null
 let emittedHoverNodeId: string | null = null
@@ -55,53 +54,77 @@ let lastStableHoverPosition: Cartesian2 | null = null
 let hoverCandidateNodeId: string | null = null
 let hoverCandidateFrameCount = 0
 let hoverMissCount = 0
-const visibleHighlightNodeId = ref<string | null>(null)
-const hiddenMainNodeId = ref<string | null>(null)
-const transparentNodeIds = ref<Set<string>>(new Set())
 
 const hoverMissClearFrameCount = 2
 const hoverSwitchConfirmFrameCount = 2
 const hoverSwitchMinPixelDistance = 8
+const normalFeatureColor = Color.WHITE
+const hoverFeatureColor = Color.fromCssColorString('#fff47a').withAlpha(0.55)
+const selectedFeatureColor = Color.fromCssColorString('#18f3ff').withAlpha(0.85)
+const hiddenFeatureColor = Color.WHITE.withAlpha(0.12)
 
 const nodeById = new Map<string, ModelNodeItem>()
+const nodeIdByRuntimeName = new Map<string, string>()
 const nodeIdByName = new Map<string, string>()
-const nodeIdByIndex = new Map<number, string>()
+const nodeIdByContentKey = new Map<string, string>()
+const featureByNodeId = new Map<string, Set<Cesium3DTileFeature>>()
+const contentByNodeId = new Map<string, Set<TileContentTarget>>()
+
+interface TileContentTarget {
+  url?: string
+  innerContents?: unknown[]
+  featuresLength?: number
+  getFeature?: (batchId: number) => Cesium3DTileFeature
+  _model?: {
+    show?: boolean
+    color?: Color
+    silhouetteColor?: Color
+    silhouetteSize?: number
+  }
+}
+
+interface PickedTileObject {
+  content?: unknown
+  detail?: {
+    model?: {
+      content?: unknown
+    }
+  }
+}
 
 watch(
   () => props.nodes,
   (nodes) => {
     nodeById.clear()
+    nodeIdByRuntimeName.clear()
     nodeIdByName.clear()
-    nodeIdByIndex.clear()
+    nodeIdByContentKey.clear()
 
     nodes.forEach((node) => {
       nodeById.set(node.id, node)
-      nodeIdByName.set(node.runtimeName, node.id)
-      nodeIdByIndex.set(node.nodeIndex, node.id)
+      nodeIdByRuntimeName.set(node.runtimeName, node.id)
+      nodeIdByName.set(node.name, node.id)
+      registerContentKeys(node)
     })
 
-    hideAllHighlightNodes()
-    hideAllTransparentNodes()
-    syncTransparentVisibility()
-    syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
-    void ensureMeshPicker()
+    syncFeatureStyles()
   },
   { immediate: true }
 )
 
 watch(
   () => props.hiddenNodeIds,
-  () => syncTransparentVisibility()
+  () => syncFeatureStyles()
 )
 
 watch(
   () => props.selectedNodeId,
-  () => syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
+  () => syncFeatureStyles()
 )
 
 watch(
   () => props.hoveredNodeId,
-  () => syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
+  () => syncFeatureStyles()
 )
 
 watch(
@@ -111,7 +134,7 @@ watch(
       clearHoverState()
     }
 
-    syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
+    syncFeatureStyles()
   }
 )
 
@@ -149,90 +172,59 @@ onMounted(async () => {
     viewer.scene.screenSpaceCameraController.enableCollisionDetection = false
     ;(viewer.cesiumWidget.creditContainer as HTMLElement).style.display = 'none'
 
-    const modelMatrix = Transforms.eastNorthUpToFixedFrame(
+    const tilesetModelMatrix = Transforms.eastNorthUpToFixedFrame(
       Cartesian3.fromDegrees(116.3913, 39.9075, 30)
     )
-    modelMatrixRef.value = modelMatrix
 
-    const mainModel = await Model.fromGltfAsync({
-      url: props.modelUrl,
-      modelMatrix,
-      allowPicking: true,
-      enablePick: true,
-      incrementallyLoadTextures: true
+    const tileset = await Cesium3DTileset.fromUrl(props.tilesetUrl, {
+      maximumScreenSpaceError: 12,
+      modelMatrix: tilesetModelMatrix,
+      // modelUpAxis: Axis.Z,
+      dynamicScreenSpaceError: true,
+      dynamicScreenSpaceErrorDensity: 2.0e-4,
+      dynamicScreenSpaceErrorFactor: 24,
+      skipLevelOfDetail: true,
+      baseScreenSpaceError: 1024,
+      skipScreenSpaceErrorFactor: 16,
+      skipLevels: 1,
+      immediatelyLoadDesiredLevelOfDetail: false,
+      loadSiblings: false,
+      foveatedScreenSpaceError: true,
+      foveatedConeSize: 0.25,
+      foveatedTimeDelay: 0.2,
+      cacheBytes: 512 * 1024 * 1024,
+      maximumCacheOverflowBytes: 256 * 1024 * 1024,
+      featureIdLabel: 'featureId_0',
+      enableCollision: true,
+      lightColor: new Cartesian3(4.2, 4.2, 4.2)
     })
 
-    mainModel.lightColor = new Cartesian3(4.2, 4.2, 4.2)
-
-    const highlightModel = await Model.fromGltfAsync({
-      url: props.modelUrl,
-      modelMatrix: Matrix4.clone(modelMatrix),
-      allowPicking: false,
-      enablePick: false,
-      incrementallyLoadTextures: true
-    })
-
-    const transparentModel = await Model.fromGltfAsync({
-      url: props.modelUrl,
-      modelMatrix: Matrix4.clone(modelMatrix),
-      allowPicking: false,
-      enablePick: false,
-      incrementallyLoadTextures: true
-    })
-
-    highlightModel.color = Color.fromCssColorString('#18f3ff').withAlpha(0.88)
-    highlightModel.colorBlendMode = ColorBlendMode.REPLACE
-    highlightModel.silhouetteColor = Color.fromCssColorString('#fff47a')
-    highlightModel.silhouetteSize = 2.5
-    highlightModel.lightColor = new Cartesian3(5.5, 5.5, 5.5)
-    highlightModel.show = false
-
-    transparentModel.color = Color.fromCssColorString('#bde9ff').withAlpha(0.1)
-    transparentModel.colorBlendMode = ColorBlendMode.REPLACE
-    transparentModel.silhouetteColor = Color.fromCssColorString('#bde9ff').withAlpha(0.35)
-    transparentModel.silhouetteSize = 1.2
-    transparentModel.lightColor = new Cartesian3(4.8, 4.8, 4.8)
-    transparentModel.show = false
-
-    viewer.scene.primitives.add(mainModel)
-    viewer.scene.primitives.add(transparentModel)
-    viewer.scene.primitives.add(highlightModel)
-
-    mainModelRef.value = mainModel
-    transparentModelRef.value = transparentModel
-    highlightModelRef.value = highlightModel
-
-    await Promise.all([
-      waitForModelReady(mainModel),
-      waitForModelReady(transparentModel),
-      waitForModelReady(highlightModel)
-    ])
-
-    hideAllHighlightNodes()
-    hideAllTransparentNodes()
-    syncTransparentVisibility()
-    syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
-    void ensureMeshPicker()
+    tileset.colorBlendMode = Cesium3DTileColorBlendMode.HIGHLIGHT
+    tileset.colorBlendAmount = 0.55
+    viewer.scene.primitives.add(tileset)
+    tilesetRef.value = tileset
+    installTileLifecycleHandlers(tileset)
     installPickHandler(viewer)
 
-    viewer.camera.flyToBoundingSphere(mainModel.boundingSphere, {
+    await viewer.flyTo(tileset, {
       duration: 0.9,
-      offset: new HeadingPitchRange(0.72, -0.58, mainModel.boundingSphere.radius * 2.8)
+      offset: new HeadingPitchRange(0.72, -0.58, 0)
     })
     viewer.scene.requestRender()
 
     emit('ready')
   } catch (error) {
-    emit('error', error instanceof Error ? error.message : 'Cesium 场景初始化失败')
+    emit('error', error instanceof Error ? error.message : 'Cesium 3D Tiles scene failed to initialize')
   }
 })
 
 onBeforeUnmount(() => {
   removeCanvasLeaveListener?.()
+  removeTileVisibleListener?.()
+  removeTileUnloadListener?.()
   if (hoverFrameId) {
     cancelAnimationFrame(hoverFrameId)
   }
-  meshPickerRef.value?.dispose()
   handlerRef.value?.destroy()
   viewerRef.value?.destroy()
 })
@@ -264,171 +256,261 @@ function installPickHandler(viewer: Viewer): void {
   handlerRef.value = handler
 }
 
-function resolvePickedNodeId(picked: unknown): string | null {
-  const pickedObject = picked as {
-    node?: { name?: string; id?: number | string }
-    detail?: {
-      node?: {
-        name?: string
-        id?: number | string
-        node?: { name?: string; index?: number }
-      }
+function installTileLifecycleHandlers(tileset: Cesium3DTileset): void {
+  removeTileVisibleListener = tileset.tileVisible.addEventListener((tile) => {
+    collectVisibleTileFeatures(tile)
+    syncFeatureStyles()
+  })
+
+  removeTileUnloadListener = tileset.tileUnload.addEventListener((tile) => {
+    removeTileFeatures(tile)
+  })
+}
+
+function collectVisibleTileFeatures(tile: { content?: unknown }): void {
+  collectContentFeatures(tile.content).forEach((feature) => {
+    const nodeId = resolveFeatureNodeId(feature)
+
+    if (!nodeId) {
+      return
+    }
+
+    const features = featureByNodeId.get(nodeId) ?? new Set<Cesium3DTileFeature>()
+    features.add(feature)
+    featureByNodeId.set(nodeId, features)
+  })
+
+  collectContentTargets(tile.content).forEach((content) => {
+    const nodeId = resolveContentNodeId(content)
+
+    if (!nodeId) {
+      return
+    }
+
+    cacheContent(nodeId, content)
+  })
+}
+
+function removeTileFeatures(tile: { content?: unknown }): void {
+  const tileFeatures = new Set(collectContentFeatures(tile.content))
+  const tileContents = new Set(collectContentTargets(tile.content))
+
+  featureByNodeId.forEach((features, nodeId) => {
+    tileFeatures.forEach((feature) => features.delete(feature))
+
+    if (features.size === 0) {
+      featureByNodeId.delete(nodeId)
+    }
+  })
+
+  contentByNodeId.forEach((contents, nodeId) => {
+    tileContents.forEach((content) => contents.delete(content))
+
+    if (contents.size === 0) {
+      contentByNodeId.delete(nodeId)
+    }
+  })
+}
+
+function collectContentFeatures(content: unknown): Cesium3DTileFeature[] {
+  const tileContent = content as {
+    featuresLength?: number
+    getFeature?: (batchId: number) => Cesium3DTileFeature
+    innerContents?: unknown[]
+  } | null
+
+  if (!tileContent) {
+    return []
+  }
+
+  const features: Cesium3DTileFeature[] = []
+
+  for (let index = 0; index < (tileContent.featuresLength ?? 0); index += 1) {
+    const feature = tileContent.getFeature?.(index)
+
+    if (feature) {
+      features.push(feature)
     }
   }
-  const nodeName =
-    pickedObject?.node?.name ??
-    pickedObject?.detail?.node?.name ??
-    pickedObject?.detail?.node?.node?.name
-  const nodeIndex =
-    pickedObject?.node?.id ??
-    pickedObject?.detail?.node?.id ??
-    pickedObject?.detail?.node?.node?.index
 
-  if (nodeName && nodeIdByName.has(nodeName)) {
-    return nodeIdByName.get(nodeName) ?? null
+  tileContent.innerContents?.forEach((innerContent) => {
+    features.push(...collectContentFeatures(innerContent))
+  })
+
+  return features
+}
+
+function collectContentTargets(content: unknown): TileContentTarget[] {
+  const tileContent = content as TileContentTarget | null
+
+  if (!tileContent) {
+    return []
   }
 
-  if (typeof nodeIndex === 'number' && nodeIdByIndex.has(nodeIndex)) {
-    return nodeIdByIndex.get(nodeIndex) ?? null
+  const targets = tileContent._model ? [tileContent] : []
+
+  tileContent.innerContents?.forEach((innerContent) => {
+    targets.push(...collectContentTargets(innerContent))
+  })
+
+  return targets
+}
+
+function pickNode(viewer: Viewer, position: Cartesian2): string | null {
+  const picked = viewer.scene.pick(position, 5, 5)
+
+  if (picked instanceof Cesium3DTileFeature) {
+    const nodeId = resolveFeatureNodeId(picked)
+
+    if (nodeId && !props.hiddenNodeIds.has(nodeId)) {
+      cacheFeature(nodeId, picked)
+      return nodeId
+    }
+
+    return null
   }
 
-  if (typeof nodeIndex === 'string') {
-    const parsedIndex = Number(nodeIndex)
+  const content = getPickedContent(picked)
+  const nodeId = resolveContentNodeId(content)
 
-    if (Number.isFinite(parsedIndex) && nodeIdByIndex.has(parsedIndex)) {
-      return nodeIdByIndex.get(parsedIndex) ?? null
+  if (nodeId && !props.hiddenNodeIds.has(nodeId)) {
+    cacheContent(nodeId, content)
+    return nodeId
+  }
+
+  return null
+}
+
+function getPickedContent(picked: unknown): TileContentTarget | null {
+  const pickedTile = picked as PickedTileObject | null
+
+  return (pickedTile?.content ?? pickedTile?.detail?.model?.content ?? null) as TileContentTarget | null
+}
+
+function resolveFeatureNodeId(feature: Cesium3DTileFeature): string | null {
+  const candidates = [
+    getFeatureStringProperty(feature, 'propertiesID'),
+    getFeatureStringProperty(feature, 'meshName'),
+    getFeatureStringProperty(feature, 'name')
+  ].filter(Boolean)
+
+  for (const candidate of candidates) {
+    if (nodeById.has(candidate)) {
+      return candidate
+    }
+
+    const runtimeId = nodeIdByRuntimeName.get(candidate)
+    if (runtimeId) {
+      return runtimeId
+    }
+
+    const nameId = nodeIdByName.get(candidate)
+    if (nameId) {
+      return nameId
     }
   }
 
   return null
 }
 
-function syncHighlight(nodeId: string | null, mode: 'selected' | 'hover'): void {
-  const highlightModel = highlightModelRef.value
-
-  if (!highlightModel) {
-    return
-  }
-
-  if (!nodeId) {
-    hideVisibleHighlightNode()
-    restoreHiddenMainNode()
-    highlightModel.show = false
-    return
-  }
-
-  const node = nodeById.get(nodeId)
-
-  if (!node) {
-    return
-  }
-
-  hideVisibleHighlightNode()
-  restoreHiddenMainNode()
-  applyHighlightStyle(mode)
-
-  const modelNode = safeGetNode(highlightModel, node.runtimeName)
-
-  if (!modelNode) {
-    highlightModel.show = false
-    return
-  }
-
-  modelNode.show = true
-  setNodeVisible(transparentModelRef.value, nodeId, false)
-  if (mode === 'selected') {
-    hideMainNode(nodeId)
-  }
-  visibleHighlightNodeId.value = nodeId
-  highlightModel.show = true
-  viewerRef.value?.scene.requestRender()
-}
-
-function hideAllHighlightNodes(): void {
-  const highlightModel = highlightModelRef.value
-
-  if (!highlightModel) {
-    return
-  }
-
-  props.nodes.forEach((node) => {
-    const modelNode = safeGetNode(highlightModel, node.runtimeName)
-
-    if (modelNode) {
-      modelNode.show = false
-    }
-  })
-
-  visibleHighlightNodeId.value = null
-  highlightModel.show = false
-  viewerRef.value?.scene.requestRender()
-}
-
-async function ensureMeshPicker(): Promise<void> {
-  if (meshPickerRef.value || meshPickerPromise || props.nodes.length === 0) {
-    return
-  }
-
-  meshPickerPromise = createMeshPicker({
-    modelUrl: props.modelUrl,
-    nodeIdByName: new Map(nodeIdByName)
-  })
-
-  try {
-    meshPickerRef.value = await meshPickerPromise
-  } catch (error) {
-    emit(
-      'error',
-      error instanceof Error
-        ? `精准拾取索引加载失败：${error.message}`
-        : '精准拾取索引加载失败'
-    )
-  } finally {
-    meshPickerPromise = null
-  }
-}
-
-function pickNode(viewer: Viewer, position: Cartesian2): string | null {
-  return pickPreciseNode(viewer, position) ?? pickGpuNode(viewer, position)
-}
-
-function pickPreciseNode(viewer: Viewer, position: Cartesian2): string | null {
-  const modelMatrix = modelMatrixRef.value
-  const picker = meshPickerRef.value
-
-  if (!modelMatrix || !picker) {
+function resolveContentNodeId(content: TileContentTarget | null): string | null {
+  if (!content) {
     return null
   }
 
-  return picker.pick(position, viewer.camera, modelMatrix)
+  const contentKey = normalizeContentKey(content.url)
+
+  if (contentKey) {
+    const directNodeId = nodeIdByContentKey.get(contentKey)
+
+    if (directNodeId) {
+      return directNodeId
+    }
+
+    const compositeNodeId = findNodeIdByContentPrefix(contentKey)
+
+    if (compositeNodeId) {
+      return compositeNodeId
+    }
+  }
+
+  return null
 }
 
-function pickGpuNode(viewer: Viewer, position: Cartesian2): string | null {
-  const offsets = [
-    [0, 0],
-    [-1, 0],
-    [1, 0],
-    [0, -1],
-    [0, 1],
-    [-2, 0],
-    [2, 0],
-    [0, -2],
-    [0, 2]
-  ] as const
+function getFeatureStringProperty(feature: Cesium3DTileFeature, propertyName: string): string {
+  const value = feature.getProperty(propertyName)
 
-  for (const [offsetX, offsetY] of offsets) {
-    const samplePosition =
-      offsetX === 0 && offsetY === 0
-        ? position
-        : new Cartesian2(position.x + offsetX, position.y + offsetY)
-    const nodeId = resolvePickedNodeId(viewer.scene.pick(samplePosition))
+  return value === undefined || value === null ? '' : String(value)
+}
 
-    if (nodeId) {
+function cacheFeature(nodeId: string, feature: Cesium3DTileFeature): void {
+  const features = featureByNodeId.get(nodeId) ?? new Set<Cesium3DTileFeature>()
+
+  features.add(feature)
+  featureByNodeId.set(nodeId, features)
+}
+
+function cacheContent(nodeId: string, content: TileContentTarget | null): void {
+  if (!content?._model) {
+    return
+  }
+
+  const contents = contentByNodeId.get(nodeId) ?? new Set<TileContentTarget>()
+
+  contents.add(content)
+  contentByNodeId.set(nodeId, contents)
+}
+
+function registerContentKeys(node: ModelNodeItem): void {
+  const keys = new Set<string>()
+  const runtimeContentKey = getRuntimeContentKey(node.runtimeName)
+
+  if (runtimeContentKey) {
+    keys.add(runtimeContentKey)
+  }
+
+  const normalizedRuntimeName = normalizeContentKey(node.runtimeName)
+
+  if (normalizedRuntimeName) {
+    keys.add(normalizedRuntimeName)
+  }
+
+  keys.forEach((key) => {
+    if (!nodeIdByContentKey.has(key)) {
+      nodeIdByContentKey.set(key, node.id)
+    }
+  })
+}
+
+function getRuntimeContentKey(runtimeName: string): string {
+  const match = runtimeName.match(/^(.+\.(?:b3dm|cmpt|glb)(?:#\d+)?):\d+$/i)
+
+  return match ? match[1] : ''
+}
+
+function findNodeIdByContentPrefix(contentKey: string): string | null {
+  for (const [runtimeName, nodeId] of nodeIdByRuntimeName) {
+    if (runtimeName.startsWith(`${contentKey}:`) || runtimeName.startsWith(`${contentKey}#`)) {
       return nodeId
     }
   }
 
   return null
+}
+
+function normalizeContentKey(value: string | undefined): string {
+  if (!value) {
+    return ''
+  }
+
+  const withoutQuery = value.split('?')[0].split('#')[0]
+  const name = withoutQuery.split('/').pop()?.split('\\').pop() ?? ''
+
+  try {
+    return decodeURIComponent(name)
+  } catch {
+    return name
+  }
 }
 
 function scheduleHoverPick(viewer: Viewer, position: Cartesian2): void {
@@ -450,12 +532,8 @@ function scheduleHoverPick(viewer: Viewer, position: Cartesian2): void {
       return
     }
 
-    updateStableHoverNode(pickHoverNode(viewer, pendingHoverPosition), pendingHoverPosition)
+    updateStableHoverNode(pickNode(viewer, pendingHoverPosition), pendingHoverPosition)
   })
-}
-
-function pickHoverNode(viewer: Viewer, position: Cartesian2): string | null {
-  return pickPreciseNode(viewer, position) ?? pickGpuNode(viewer, position)
 }
 
 function updateStableHoverNode(candidateNodeId: string | null, position: Cartesian2): void {
@@ -539,175 +617,71 @@ function updateHoverNode(nodeId: string | null): void {
   emit('hover-node', nodeId)
 }
 
-function getActiveHighlightNodeId(): string | null {
-  return props.hoverHighlightEnabled ? props.hoveredNodeId ?? props.selectedNodeId : props.selectedNodeId
-}
-
-function getActiveHighlightMode(): 'selected' | 'hover' {
-  return props.hoverHighlightEnabled && props.hoveredNodeId ? 'hover' : 'selected'
-}
-
-function applyHighlightStyle(mode: 'selected' | 'hover'): void {
-  const highlightModel = highlightModelRef.value
-
-  if (!highlightModel) {
-    return
-  }
-
-  if (mode === 'hover') {
-    highlightModel.color = Color.fromCssColorString('#fff47a').withAlpha(0.2)
-    highlightModel.silhouetteColor = Color.fromCssColorString('#18f3ff')
-    highlightModel.silhouetteSize = 2.8
-    return
-  }
-
-  highlightModel.color = Color.fromCssColorString('#18f3ff').withAlpha(0.88)
-  highlightModel.silhouetteColor = Color.fromCssColorString('#fff47a')
-  highlightModel.silhouetteSize = 2.5
-}
-
-function syncTransparentVisibility(): void {
-  const mainModel = mainModelRef.value
-  const transparentModel = transparentModelRef.value
-
-  if (!mainModel || !transparentModel) {
-    return
-  }
-
-  const nextTransparentNodeIds = new Set<string>()
-
-  transparentNodeIds.value.forEach((nodeId) => {
-    if (!props.hiddenNodeIds.has(nodeId)) {
-      setNodeVisible(transparentModel, nodeId, false)
-
-      if (nodeId !== visibleHighlightNodeId.value) {
-        setNodeVisible(mainModel, nodeId, true)
-      }
-    }
-  })
-
-  props.hiddenNodeIds.forEach((nodeId) => {
-    setNodeVisible(mainModel, nodeId, false)
-    setNodeVisible(transparentModel, nodeId, nodeId !== visibleHighlightNodeId.value)
-    nextTransparentNodeIds.add(nodeId)
-  })
-
-  transparentNodeIds.value = nextTransparentNodeIds
-  transparentModel.show = nextTransparentNodeIds.size > 0
-  viewerRef.value?.scene.requestRender()
-}
-
-function hideAllTransparentNodes(): void {
-  const transparentModel = transparentModelRef.value
-
-  if (!transparentModel) {
-    return
-  }
-
-  props.nodes.forEach((node) => {
-    const modelNode = safeGetNode(transparentModel, node.runtimeName)
-
-    if (modelNode) {
-      modelNode.show = false
-    }
-  })
-
-  transparentNodeIds.value = new Set()
-  transparentModel.show = false
-  viewerRef.value?.scene.requestRender()
-}
-
-function hideVisibleHighlightNode(): void {
-  const highlightModel = highlightModelRef.value
-  const nodeId = visibleHighlightNodeId.value
-
-  if (!highlightModel || !nodeId) {
-    return
-  }
-
-  const node = nodeById.get(nodeId)
-  const modelNode = node ? safeGetNode(highlightModel, node.runtimeName) : null
-
-  if (modelNode) {
-    modelNode.show = false
-  }
-
-  if (props.hiddenNodeIds.has(nodeId)) {
-    setNodeVisible(transparentModelRef.value, nodeId, true)
-  }
-
-  visibleHighlightNodeId.value = null
-  viewerRef.value?.scene.requestRender()
-}
-
-function hideMainNode(nodeId: string): void {
-  const mainModel = mainModelRef.value
-  const node = nodeById.get(nodeId)
-
-  if (!mainModel || !node) {
-    return
-  }
-
-  const modelNode = safeGetNode(mainModel, node.runtimeName)
-
-  if (modelNode) {
-    modelNode.show = false
-    hiddenMainNodeId.value = nodeId
-  }
-
-  viewerRef.value?.scene.requestRender()
-}
-
-function restoreHiddenMainNode(): void {
-  const mainModel = mainModelRef.value
-  const nodeId = hiddenMainNodeId.value
-
-  if (!mainModel || !nodeId) {
-    return
-  }
-
-  const node = nodeById.get(nodeId)
-  const modelNode = node ? safeGetNode(mainModel, node.runtimeName) : null
-
-  if (modelNode && !props.hiddenNodeIds.has(nodeId)) {
-    modelNode.show = true
-  }
-
-  if (props.hiddenNodeIds.has(nodeId)) {
-    setNodeVisible(transparentModelRef.value, nodeId, true)
-  }
-
-  hiddenMainNodeId.value = null
-  viewerRef.value?.scene.requestRender()
-}
-
-function setNodeVisible(model: Model | null, nodeId: string, visible: boolean): void {
-  const node = nodeById.get(nodeId)
-  const modelNode = node && model ? safeGetNode(model, node.runtimeName) : null
-
-  if (modelNode) {
-    modelNode.show = visible
-  }
-}
-
-function safeGetNode(model: Model, nodeName: string) {
-  try {
-    return model.getNode(nodeName)
-  } catch {
-    return undefined
-  }
-}
-
-function waitForModelReady(model: Model): Promise<void> {
-  if (model.ready) {
-    return Promise.resolve()
-  }
-
-  return new Promise((resolve) => {
-    const removeListener = model.readyEvent.addEventListener(() => {
-      removeListener()
-      resolve()
+function syncFeatureStyles(): void {
+  featureByNodeId.forEach((features, nodeId) => {
+    features.forEach((feature) => {
+      applyFeatureStyle(feature, nodeId)
     })
   })
+
+  contentByNodeId.forEach((contents, nodeId) => {
+    contents.forEach((content) => {
+      applyContentStyle(content, nodeId)
+    })
+  })
+
+  tilesetRef.value?.makeStyleDirty()
+  viewerRef.value?.scene.requestRender()
+}
+
+function applyFeatureStyle(feature: Cesium3DTileFeature, nodeId: string): void {
+  feature.show = true
+  feature.color = normalFeatureColor
+
+  if (props.hiddenNodeIds.has(nodeId)) {
+    // feature.show = false
+    feature.color = hiddenFeatureColor
+    return
+  }
+
+  if (nodeId === props.selectedNodeId) {
+    feature.color = selectedFeatureColor
+    return
+  }
+
+  if (props.hoverHighlightEnabled && nodeId === props.hoveredNodeId) {
+    feature.color = hoverFeatureColor
+  }
+}
+
+function applyContentStyle(content: TileContentTarget, nodeId: string): void {
+  const model = content._model
+
+  if (!model) {
+    return
+  }
+
+  model.show = true
+  model.color = normalFeatureColor
+  model.silhouetteSize = 0
+
+  if (props.hiddenNodeIds.has(nodeId)) {
+    // model.show = false
+    model.color = hiddenFeatureColor
+    return
+  }
+
+  if (nodeId === props.selectedNodeId) {
+    model.color = selectedFeatureColor
+    model.silhouetteColor = selectedFeatureColor
+    model.silhouetteSize = 1.6
+    return
+  }
+
+  if (props.hoverHighlightEnabled && nodeId === props.hoveredNodeId) {
+    model.color = hoverFeatureColor
+    model.silhouetteColor = hoverFeatureColor
+    model.silhouetteSize = 0.9
+  }
 }
 </script>

@@ -4,7 +4,7 @@
       <div class="brand-block">
         <div class="brand-mark">DT</div>
         <div>
-          <h1>BIM &#25968;&#23383;&#23418;&#29983;</h1>
+          <h1>BIM 数字孪生</h1>
           <p>CesiumJS &#26500;&#20214;&#32852;&#21160; Demo</p>
         </div>
       </div>
@@ -12,7 +12,7 @@
       <div class="metric-strip">
         <div>
           <strong>{{ materialGroups.length }}</strong>
-          <span>&#26448;&#36136;&#20998;&#32452;</span>
+          <span>图层分组</span>
         </div>
         <div>
           <strong>{{ allNodes.length }}</strong>
@@ -33,7 +33,7 @@
 
     <section class="viewer-panel">
       <TwinViewer
-        :model-url="modelUrl"
+        :tileset-url="tilesetUrl"
         :nodes="allNodes"
         :selected-node-id="selectedNodeId"
         :hovered-node-id="hoveredNodeId"
@@ -74,7 +74,7 @@
             <strong>{{ selectedInfo.meshIndex }}</strong>
           </div>
           <div>
-            <span>&#26448;&#36136;&#20998;&#32452;</span>
+            <span>图层 / 类型</span>
             <strong>{{ selectedInfo.materialName }}</strong>
           </div>
           <div>
@@ -97,19 +97,19 @@
         <div class="summary-grid">
           <div>
             <span>&#25991;&#20214;</span>
-            <strong>t.glb</strong>
+            <strong>3D Tiles</strong>
           </div>
           <div>
             <span>&#33410;&#28857;</span>
             <strong>{{ allNodes.length }}</strong>
           </div>
           <div>
-            <span>&#26448;&#36136;</span>
+            <span>图层</span>
             <strong>{{ materialGroups.length }}</strong>
           </div>
           <div>
             <span>&#39640;&#20142;&#27169;&#24335;</span>
-            <strong>&#20960;&#20309;&#25342;&#21462;</strong>
+            <strong>Feature / Tile</strong>
           </div>
         </div>
       </section>
@@ -143,9 +143,9 @@ import { computed, onMounted, ref, watch } from 'vue'
 import ModelTree from './components/ModelTree.vue'
 import TwinViewer from './components/TwinViewer.vue'
 import type { MaterialGroup, ModelNodeItem } from './types/model'
-import { loadModelGroups } from './utils/gltf'
+import { loadTilesetGroups } from './utils/tiles'
 
-const modelUrl = '/models/t.glb'
+const tilesetUrl = '/models/3d-tiles/tileset.json'
 
 const materialGroups = ref<MaterialGroup[]>([])
 const selectedNodeId = ref<string | null>(null)
@@ -225,7 +225,7 @@ watch(hoverHighlightEnabled, (enabled) => {
 
 onMounted(async () => {
   try {
-    materialGroups.value = await loadModelGroups(modelUrl)
+    materialGroups.value = await loadTilesetGroups(tilesetUrl)
   } catch (error) {
     metadataError.value = error instanceof Error ? error.message : '\u6a21\u578b\u76ee\u5f55\u89e3\u6790\u5931\u8d25'
   } finally {

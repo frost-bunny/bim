@@ -2,7 +2,7 @@
   <section class="tree-panel">
     <label class="search-box">
       <span>搜索</span>
-      <input v-model.trim="keyword" type="search" placeholder="构件 ID / 材质名称" />
+      <input v-model.trim="keyword" type="search" placeholder="构件 ID / 图层 / 类型" />
     </label>
 
     <div v-if="loading" class="tree-loading">
@@ -41,8 +41,8 @@
               type="button"
               class="visibility-button"
               :class="{ off: hiddenNodeIds.has(node.id) }"
-              :title="hiddenNodeIds.has(node.id) ? '显示构件' : '隐藏为透明'"
-              :aria-label="hiddenNodeIds.has(node.id) ? '显示构件' : '隐藏为透明'"
+              :title="hiddenNodeIds.has(node.id) ? '显示构件' : '隐藏构件'"
+              :aria-label="hiddenNodeIds.has(node.id) ? '显示构件' : '隐藏构件'"
               @click.stop="$emit('toggle-node-visibility', node.id)"
             >
               <svg v-if="!hiddenNodeIds.has(node.id)" viewBox="0 0 24 24" aria-hidden="true">
