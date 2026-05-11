@@ -12,7 +12,6 @@ import {
   HeadingPitchRange,
   Matrix4,
   Model,
-  SceneTransforms,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   Transforms,
@@ -20,16 +19,20 @@ import {
 } from 'cesium'
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import type { ModelNodeItem } from '../types/model'
+import { createMeshPicker, type MeshPicker } from '../utils/meshPicker'
 
 const props = defineProps<{
   modelUrl: string
   nodes: ModelNodeItem[]
   selectedNodeId: string | null
+  hoveredNodeId: string | null
+  hoverHighlightEnabled: boolean
   hiddenNodeIds: Set<string>
 }>()
 
 const emit = defineEmits<{
   (event: 'select-node', nodeId: string): void
+  (event: 'hover-node', nodeId: string | null): void
   (event: 'ready'): void
   (event: 'error', message: string): void
 }>()
@@ -40,8 +43,13 @@ const mainModelRef = shallowRef<Model | null>(null)
 const highlightModelRef = shallowRef<Model | null>(null)
 const transparentModelRef = shallowRef<Model | null>(null)
 const handlerRef = shallowRef<ScreenSpaceEventHandler | null>(null)
+const meshPickerRef = shallowRef<MeshPicker | null>(null)
 const modelMatrixRef = shallowRef<Matrix4 | null>(null)
-let removeCanvasClickListener: (() => void) | null = null
+let removeCanvasLeaveListener: (() => void) | null = null
+let meshPickerPromise: Promise<MeshPicker> | null = null
+let hoverFrameId = 0
+let pendingHoverPosition: Cartesian2 | null = null
+let emittedHoverNodeId: string | null = null
 const visibleHighlightNodeId = ref<string | null>(null)
 const hiddenMainNodeId = ref<string | null>(null)
 const transparentNodeIds = ref<Set<string>>(new Set())
@@ -49,18 +57,6 @@ const transparentNodeIds = ref<Set<string>>(new Set())
 const nodeById = new Map<string, ModelNodeItem>()
 const nodeIdByName = new Map<string, string>()
 const nodeIdByIndex = new Map<number, string>()
-
-interface ProjectedNodeHit {
-  nodeId: string
-  centerDistance: number
-  area: number
-  rect: {
-    minX: number
-    minY: number
-    maxX: number
-    maxY: number
-  }
-}
 
 watch(
   () => props.nodes,
@@ -78,7 +74,8 @@ watch(
     hideAllHighlightNodes()
     hideAllTransparentNodes()
     syncTransparentVisibility()
-    syncHighlight(props.selectedNodeId)
+    syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
+    void ensureMeshPicker()
   },
   { immediate: true }
 )
@@ -90,7 +87,23 @@ watch(
 
 watch(
   () => props.selectedNodeId,
-  (nodeId) => syncHighlight(nodeId)
+  () => syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
+)
+
+watch(
+  () => props.hoveredNodeId,
+  () => syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
+)
+
+watch(
+  () => props.hoverHighlightEnabled,
+  (enabled) => {
+    if (!enabled) {
+      updateHoverNode(null)
+    }
+
+    syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
+  }
 )
 
 onMounted(async () => {
@@ -189,7 +202,8 @@ onMounted(async () => {
     hideAllHighlightNodes()
     hideAllTransparentNodes()
     syncTransparentVisibility()
-    syncHighlight(props.selectedNodeId)
+    syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
+    void ensureMeshPicker()
     installPickHandler(viewer)
 
     viewer.camera.flyToBoundingSphere(mainModel.boundingSphere, {
@@ -205,7 +219,11 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  removeCanvasClickListener?.()
+  removeCanvasLeaveListener?.()
+  if (hoverFrameId) {
+    cancelAnimationFrame(hoverFrameId)
+  }
+  meshPickerRef.value?.dispose()
   handlerRef.value?.destroy()
   viewerRef.value?.destroy()
 })
@@ -214,30 +232,27 @@ function installPickHandler(viewer: Viewer): void {
   const handler = new ScreenSpaceEventHandler(viewer.scene.canvas)
 
   handler.setInputAction((movement: { position: Cartesian2 }) => {
-    const picked = viewer.scene.pick(movement.position)
-    const nodeId = resolvePickedNodeId(picked) ?? findNearestProjectedNode(viewer, movement.position)
+    const nodeId =
+      props.hoverHighlightEnabled && props.hoveredNodeId
+        ? props.hoveredNodeId
+        : pickNode(viewer, movement.position)
 
     if (nodeId) {
       emit('select-node', nodeId)
     }
   }, ScreenSpaceEventType.LEFT_CLICK)
 
+  handler.setInputAction((movement: { endPosition: Cartesian2 }) => {
+    scheduleHoverPick(viewer, movement.endPosition)
+  }, ScreenSpaceEventType.MOUSE_MOVE)
+
+  const handleCanvasLeave = () => {
+    updateHoverNode(null)
+  }
+
+  viewer.scene.canvas.addEventListener('mouseleave', handleCanvasLeave)
+  removeCanvasLeaveListener = () => viewer.scene.canvas.removeEventListener('mouseleave', handleCanvasLeave)
   handlerRef.value = handler
-
-  const handleCanvasClick = (event: MouseEvent) => {
-    const canvasPosition = new Cartesian2(event.offsetX, event.offsetY)
-    const picked = viewer.scene.pick(canvasPosition)
-    const nodeId = resolvePickedNodeId(picked) ?? findNearestProjectedNode(viewer, canvasPosition)
-
-    if (nodeId) {
-      emit('select-node', nodeId)
-    }
-  }
-
-  viewer.scene.canvas.addEventListener('click', handleCanvasClick)
-  removeCanvasClickListener = () => {
-    viewer.scene.canvas.removeEventListener('click', handleCanvasClick)
-  }
 }
 
 function resolvePickedNodeId(picked: unknown): string | null {
@@ -279,7 +294,7 @@ function resolvePickedNodeId(picked: unknown): string | null {
   return null
 }
 
-function syncHighlight(nodeId: string | null): void {
+function syncHighlight(nodeId: string | null, mode: 'selected' | 'hover'): void {
   const highlightModel = highlightModelRef.value
 
   if (!highlightModel) {
@@ -301,6 +316,7 @@ function syncHighlight(nodeId: string | null): void {
 
   hideVisibleHighlightNode()
   restoreHiddenMainNode()
+  applyHighlightStyle(mode)
 
   const modelNode = safeGetNode(highlightModel, node.runtimeName)
 
@@ -315,123 +331,6 @@ function syncHighlight(nodeId: string | null): void {
   visibleHighlightNodeId.value = nodeId
   highlightModel.show = true
   viewerRef.value?.scene.requestRender()
-}
-
-function findNearestProjectedNode(viewer: Viewer, clickPosition: Cartesian2): string | null {
-  const modelMatrix = modelMatrixRef.value
-
-  if (!modelMatrix || props.nodes.length === 0) {
-    return null
-  }
-
-  const selectedNode = props.selectedNodeId ? nodeById.get(props.selectedNodeId) : null
-  const selectedHit = selectedNode ? projectNodeToScreen(viewer, modelMatrix, selectedNode, clickPosition) : null
-
-  if (selectedHit && isInProjectedRect(selectedHit, clickPosition, 10)) {
-    return selectedHit.nodeId
-  }
-
-  const hits = props.nodes
-    .map((node) => projectNodeToScreen(viewer, modelMatrix, node, clickPosition))
-    .filter((hit): hit is ProjectedNodeHit => Boolean(hit))
-
-  const containingHits = hits
-    .filter((hit) => isInProjectedRect(hit, clickPosition, 2))
-    .sort((a, b) => a.area - b.area || a.centerDistance - b.centerDistance)
-
-  if (containingHits[0]) {
-    return containingHits[0].nodeId
-  }
-
-  return null
-}
-
-function projectNodeToScreen(
-  viewer: Viewer,
-  modelMatrix: Matrix4,
-  node: ModelNodeItem,
-  clickPosition: Cartesian2
-): ProjectedNodeHit | null {
-  const screenPoints = getNodeBoundsCorners(node)
-    .map((corner) => Matrix4.multiplyByPoint(modelMatrix, corner, new Cartesian3()))
-    .map((worldPoint) => SceneTransforms.worldToWindowCoordinates(viewer.scene, worldPoint))
-    .filter((point): point is Cartesian2 => Boolean(point))
-
-  if (screenPoints.length === 0) {
-    return null
-  }
-
-  const centerPoint = projectPoint(viewer, modelMatrix, node.center)
-
-  if (!centerPoint) {
-    return null
-  }
-
-  const rect = screenPoints.reduce(
-    (result, point) => ({
-      minX: Math.min(result.minX, point.x),
-      minY: Math.min(result.minY, point.y),
-      maxX: Math.max(result.maxX, point.x),
-      maxY: Math.max(result.maxY, point.y)
-    }),
-    {
-      minX: Number.POSITIVE_INFINITY,
-      minY: Number.POSITIVE_INFINITY,
-      maxX: Number.NEGATIVE_INFINITY,
-      maxY: Number.NEGATIVE_INFINITY
-    }
-  )
-  const width = Math.max(12, rect.maxX - rect.minX)
-  const height = Math.max(12, rect.maxY - rect.minY)
-  const minX = width === 12 ? centerPoint.x - 6 : rect.minX
-  const maxX = width === 12 ? centerPoint.x + 6 : rect.maxX
-  const minY = height === 12 ? centerPoint.y - 6 : rect.minY
-  const maxY = height === 12 ? centerPoint.y + 6 : rect.maxY
-  const dx = centerPoint.x - clickPosition.x
-  const dy = centerPoint.y - clickPosition.y
-
-  return {
-    nodeId: node.id,
-    centerDistance: Math.hypot(dx, dy),
-    area: width * height,
-    rect: { minX, minY, maxX, maxY }
-  }
-}
-
-function projectPoint(
-  viewer: Viewer,
-  modelMatrix: Matrix4,
-  point: [number, number, number]
-): Cartesian2 | undefined {
-  const localPoint = Cartesian3.fromElements(point[0], point[1], point[2])
-  const worldPoint = Matrix4.multiplyByPoint(modelMatrix, localPoint, new Cartesian3())
-
-  return SceneTransforms.worldToWindowCoordinates(viewer.scene, worldPoint)
-}
-
-function getNodeBoundsCorners(node: ModelNodeItem): Cartesian3[] {
-  const [minX, minY, minZ] = node.boundsMin
-  const [maxX, maxY, maxZ] = node.boundsMax
-
-  return [
-    Cartesian3.fromElements(minX, minY, minZ),
-    Cartesian3.fromElements(minX, minY, maxZ),
-    Cartesian3.fromElements(minX, maxY, minZ),
-    Cartesian3.fromElements(minX, maxY, maxZ),
-    Cartesian3.fromElements(maxX, minY, minZ),
-    Cartesian3.fromElements(maxX, minY, maxZ),
-    Cartesian3.fromElements(maxX, maxY, minZ),
-    Cartesian3.fromElements(maxX, maxY, maxZ)
-  ]
-}
-
-function isInProjectedRect(hit: ProjectedNodeHit, clickPosition: Cartesian2, padding: number): boolean {
-  return (
-    clickPosition.x >= hit.rect.minX - padding &&
-    clickPosition.x <= hit.rect.maxX + padding &&
-    clickPosition.y >= hit.rect.minY - padding &&
-    clickPosition.y <= hit.rect.maxY + padding
-  )
 }
 
 function hideAllHighlightNodes(): void {
@@ -452,6 +351,137 @@ function hideAllHighlightNodes(): void {
   visibleHighlightNodeId.value = null
   highlightModel.show = false
   viewerRef.value?.scene.requestRender()
+}
+
+async function ensureMeshPicker(): Promise<void> {
+  if (meshPickerRef.value || meshPickerPromise || props.nodes.length === 0) {
+    return
+  }
+
+  meshPickerPromise = createMeshPicker({
+    modelUrl: props.modelUrl,
+    nodeIdByName: new Map(nodeIdByName)
+  })
+
+  try {
+    meshPickerRef.value = await meshPickerPromise
+  } catch (error) {
+    emit(
+      'error',
+      error instanceof Error
+        ? `精准拾取索引加载失败：${error.message}`
+        : '精准拾取索引加载失败'
+    )
+  } finally {
+    meshPickerPromise = null
+  }
+}
+
+function pickNode(viewer: Viewer, position: Cartesian2): string | null {
+  return pickGpuNode(viewer, position) ?? pickPreciseNode(viewer, position)
+}
+
+function pickPreciseNode(viewer: Viewer, position: Cartesian2): string | null {
+  const modelMatrix = modelMatrixRef.value
+  const picker = meshPickerRef.value
+
+  if (!modelMatrix || !picker) {
+    return null
+  }
+
+  return picker.pick(position, viewer.camera, modelMatrix)
+}
+
+function pickGpuNode(viewer: Viewer, position: Cartesian2): string | null {
+  const offsets = [
+    [0, 0],
+    [-1, 0],
+    [1, 0],
+    [0, -1],
+    [0, 1],
+    [-2, 0],
+    [2, 0],
+    [0, -2],
+    [0, 2]
+  ] as const
+
+  for (const [offsetX, offsetY] of offsets) {
+    const samplePosition =
+      offsetX === 0 && offsetY === 0
+        ? position
+        : new Cartesian2(position.x + offsetX, position.y + offsetY)
+    const nodeId = resolvePickedNodeId(viewer.scene.pick(samplePosition))
+
+    if (nodeId) {
+      return nodeId
+    }
+  }
+
+  return null
+}
+
+function scheduleHoverPick(viewer: Viewer, position: Cartesian2): void {
+  if (!props.hoverHighlightEnabled) {
+    updateHoverNode(null)
+    return
+  }
+
+  pendingHoverPosition = Cartesian2.clone(position, pendingHoverPosition ?? new Cartesian2())
+
+  if (hoverFrameId) {
+    return
+  }
+
+  hoverFrameId = requestAnimationFrame(() => {
+    hoverFrameId = 0
+
+    if (!pendingHoverPosition) {
+      return
+    }
+
+    updateHoverNode(pickGpuNode(viewer, pendingHoverPosition))
+  })
+}
+
+function updateHoverNode(nodeId: string | null): void {
+  if (emittedHoverNodeId === nodeId) {
+    return
+  }
+
+  emittedHoverNodeId = nodeId
+
+  if (viewerRef.value) {
+    viewerRef.value.scene.canvas.style.cursor = nodeId ? 'pointer' : ''
+  }
+
+  emit('hover-node', nodeId)
+}
+
+function getActiveHighlightNodeId(): string | null {
+  return props.hoverHighlightEnabled ? props.hoveredNodeId ?? props.selectedNodeId : props.selectedNodeId
+}
+
+function getActiveHighlightMode(): 'selected' | 'hover' {
+  return props.hoverHighlightEnabled && props.hoveredNodeId ? 'hover' : 'selected'
+}
+
+function applyHighlightStyle(mode: 'selected' | 'hover'): void {
+  const highlightModel = highlightModelRef.value
+
+  if (!highlightModel) {
+    return
+  }
+
+  if (mode === 'hover') {
+    highlightModel.color = Color.fromCssColorString('#fff47a').withAlpha(0.86)
+    highlightModel.silhouetteColor = Color.fromCssColorString('#18f3ff')
+    highlightModel.silhouetteSize = 2.1
+    return
+  }
+
+  highlightModel.color = Color.fromCssColorString('#18f3ff').withAlpha(0.88)
+  highlightModel.silhouetteColor = Color.fromCssColorString('#fff47a')
+  highlightModel.silhouetteSize = 2.5
 }
 
 function syncTransparentVisibility(): void {

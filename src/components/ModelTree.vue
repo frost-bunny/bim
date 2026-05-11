@@ -25,7 +25,12 @@
             role="button"
             tabindex="0"
             class="node-row"
-            :class="{ active: node.id === selectedNodeId, hidden: hiddenNodeIds.has(node.id) }"
+            :ref="(element) => setNodeRowRef(node.id, element)"
+            :class="{
+              active: node.id === selectedNodeId,
+              hovered: node.id === hoveredNodeId,
+              hidden: hiddenNodeIds.has(node.id)
+            }"
             @click="$emit('select-node', node.id)"
             @keydown.enter="$emit('select-node', node.id)"
             @keydown.space.prevent="$emit('select-node', node.id)"
@@ -62,12 +67,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import type { ComponentPublicInstance } from 'vue'
 import type { MaterialGroup } from '../types/model'
 
 const props = defineProps<{
   groups: MaterialGroup[]
   selectedNodeId: string | null
+  hoveredNodeId: string | null
   hiddenNodeIds: Set<string>
   loading: boolean
 }>()
@@ -79,6 +86,7 @@ defineEmits<{
 
 const keyword = ref('')
 const expandedGroupIds = ref<Set<string>>(new Set())
+const nodeRowRefs = new Map<string, HTMLElement>()
 
 const filteredGroups = computed(() => {
   const query = keyword.value.toLowerCase()
@@ -110,7 +118,7 @@ watch(
 
 watch(
   () => props.selectedNodeId,
-  (nodeId) => {
+  async (nodeId) => {
     if (!nodeId) {
       return
     }
@@ -122,6 +130,13 @@ watch(
       next.add(group.id)
       expandedGroupIds.value = next
     }
+
+    if (keyword.value && !isNodeInFilteredGroups(nodeId)) {
+      keyword.value = ''
+    }
+
+    await nextTick()
+    scrollSelectedNodeIntoView(nodeId)
   }
 )
 
@@ -141,5 +156,35 @@ function toggleGroup(groupId: string): void {
   }
 
   expandedGroupIds.value = next
+}
+
+function setNodeRowRef(
+  nodeId: string,
+  element: Element | ComponentPublicInstance | null
+): void {
+  if (element instanceof HTMLElement) {
+    nodeRowRefs.set(nodeId, element)
+    return
+  }
+
+  nodeRowRefs.delete(nodeId)
+}
+
+function scrollSelectedNodeIntoView(nodeId: string): void {
+  const element = nodeRowRefs.get(nodeId)
+
+  if (!element) {
+    return
+  }
+
+  element.scrollIntoView({
+    block: 'center',
+    inline: 'nearest',
+    behavior: 'smooth'
+  })
+}
+
+function isNodeInFilteredGroups(nodeId: string): boolean {
+  return filteredGroups.value.some((group) => group.children.some((node) => node.id === nodeId))
 }
 </script>
