@@ -424,6 +424,9 @@ button {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.045);
+  overflow: auto;
+  scrollbar-width: none; /* Firefox 隐藏滚动条 */
+  -ms-overflow-style: none; /* IE/Edge 隐藏滚动条 */
 }
 
 .selected-card {
@@ -516,6 +519,24 @@ button {
   flex: 0 0 auto;
   accent-color: var(--accent);
   cursor: pointer;
+}
+
+.setting-select {
+  min-width: 104px;
+  height: 32px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(10, 24, 41, 0.88);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.setting-select:focus {
+  border-color: rgba(24, 243, 255, 0.72);
+  box-shadow: 0 0 0 2px rgba(24, 243, 255, 0.14);
 }
 
 .empty-state {

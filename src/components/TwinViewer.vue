@@ -5,6 +5,7 @@
 <script setup lang="ts">
 import {
   Axis,
+  BoundingSphere,
   Cartesian2,
   Cartesian3,
   Cesium3DTileFeature,
@@ -28,6 +29,9 @@ const props = defineProps<{
   selectedNodeId: string | null
   hoveredNodeId: string | null
   hoverHighlightEnabled: boolean
+  dimUnselectedOnSelect: boolean
+  selectedFocusMode: 'highlight' | 'original'
+  autoFocusSelectedEnabled: boolean
   hiddenNodeIds: Set<string>
 }>()
 
@@ -61,7 +65,8 @@ const hoverSwitchMinPixelDistance = 8
 const normalFeatureColor = Color.WHITE
 const hoverFeatureColor = Color.fromCssColorString('#fff47a').withAlpha(0.55)
 const selectedFeatureColor = Color.fromCssColorString('#18f3ff').withAlpha(0.85)
-const hiddenFeatureColor = Color.WHITE.withAlpha(0.12)
+const hiddenFeatureColor = Color.fromCssColorString('#808895').withAlpha(0.12)
+const dimmedFeatureColor = Color.fromCssColorString('#808895').withAlpha(0.14)
 
 const nodeById = new Map<string, ModelNodeItem>()
 const nodeIdByRuntimeName = new Map<string, string>()
@@ -75,11 +80,15 @@ interface TileContentTarget {
   innerContents?: unknown[]
   featuresLength?: number
   getFeature?: (batchId: number) => Cesium3DTileFeature
+  tile?: {
+    boundingSphere?: BoundingSphere
+  }
   _model?: {
     show?: boolean
     color?: Color
     silhouetteColor?: Color
     silhouetteSize?: number
+    boundingSphere?: BoundingSphere
   }
 }
 
@@ -119,7 +128,13 @@ watch(
 
 watch(
   () => props.selectedNodeId,
-  () => syncFeatureStyles()
+  (nodeId, previousNodeId) => {
+    syncFeatureStyles()
+
+    if (nodeId && nodeId !== previousNodeId) {
+      focusSelectedNode(nodeId)
+    }
+  }
 )
 
 watch(
@@ -135,6 +150,31 @@ watch(
     }
 
     syncFeatureStyles()
+  }
+)
+
+watch(
+  () => props.dimUnselectedOnSelect,
+  (enabled) => {
+    syncFeatureStyles()
+
+    if (enabled && props.selectedNodeId) {
+      focusSelectedNode(props.selectedNodeId)
+    }
+  }
+)
+
+watch(
+  () => props.selectedFocusMode,
+  () => syncFeatureStyles()
+)
+
+watch(
+  () => props.autoFocusSelectedEnabled,
+  (enabled) => {
+    if (enabled && props.selectedNodeId) {
+      focusSelectedNode(props.selectedNodeId)
+    }
   }
 )
 
@@ -634,6 +674,67 @@ function syncFeatureStyles(): void {
   viewerRef.value?.scene.requestRender()
 }
 
+function focusSelectedNode(nodeId: string): void {
+  const viewer = viewerRef.value
+  const sphere = getNodeBoundingSphere(nodeId)
+
+  if (!viewer || !sphere || !shouldAutoFocusSelectedNode()) {
+    return
+  }
+
+  const range = Math.max(sphere.radius * 3.4, 8)
+
+  viewer.camera.cancelFlight()
+  viewer.camera.flyToBoundingSphere(sphere, {
+    duration: 0.65,
+    offset: new HeadingPitchRange(0.72, -0.62, range),
+    complete: () => viewer.scene.requestRender(),
+    cancel: () => viewer.scene.requestRender()
+  })
+}
+
+function getNodeBoundingSphere(nodeId: string): BoundingSphere | null {
+  const spheres: BoundingSphere[] = []
+  const features = featureByNodeId.get(nodeId)
+  const contents = contentByNodeId.get(nodeId)
+
+  features?.forEach((feature) => {
+    const sphere = getFeatureBoundingSphere(feature)
+
+    if (sphere) {
+      spheres.push(sphere)
+    }
+  })
+
+  contents?.forEach((content) => {
+    const sphere = getContentBoundingSphere(content)
+
+    if (sphere) {
+      spheres.push(sphere)
+    }
+  })
+
+  if (spheres.length === 0) {
+    return null
+  }
+
+  if (spheres.length === 1) {
+    return BoundingSphere.clone(spheres[0])
+  }
+
+  return BoundingSphere.fromBoundingSpheres(spheres)
+}
+
+function getFeatureBoundingSphere(feature: Cesium3DTileFeature): BoundingSphere | null {
+  const content = (feature as unknown as { content?: TileContentTarget }).content
+
+  return getContentBoundingSphere(content ?? null)
+}
+
+function getContentBoundingSphere(content: TileContentTarget | null): BoundingSphere | null {
+  return content?._model?.boundingSphere ?? content?.tile?.boundingSphere ?? null
+}
+
 function applyFeatureStyle(feature: Cesium3DTileFeature, nodeId: string): void {
   feature.show = true
   feature.color = normalFeatureColor
@@ -645,7 +746,17 @@ function applyFeatureStyle(feature: Cesium3DTileFeature, nodeId: string): void {
   }
 
   if (nodeId === props.selectedNodeId) {
+    if (shouldKeepSelectedOriginal()) {
+      feature.color = normalFeatureColor
+      return
+    }
+
     feature.color = selectedFeatureColor
+    return
+  }
+
+  if (shouldDimUnselectedNode(nodeId)) {
+    feature.color = dimmedFeatureColor
     return
   }
 
@@ -672,9 +783,19 @@ function applyContentStyle(content: TileContentTarget, nodeId: string): void {
   }
 
   if (nodeId === props.selectedNodeId) {
+    if (shouldKeepSelectedOriginal()) {
+      model.color = normalFeatureColor
+      return
+    }
+
     model.color = selectedFeatureColor
     model.silhouetteColor = selectedFeatureColor
     model.silhouetteSize = 1.6
+    return
+  }
+
+  if (shouldDimUnselectedNode(nodeId)) {
+    model.color = dimmedFeatureColor
     return
   }
 
@@ -683,5 +804,21 @@ function applyContentStyle(content: TileContentTarget, nodeId: string): void {
     model.silhouetteColor = hoverFeatureColor
     model.silhouetteSize = 0.9
   }
+}
+
+function shouldDimUnselectedNode(nodeId: string): boolean {
+  return Boolean(
+    props.dimUnselectedOnSelect &&
+      props.selectedNodeId &&
+      nodeId !== props.selectedNodeId
+  )
+}
+
+function shouldKeepSelectedOriginal(): boolean {
+  return props.dimUnselectedOnSelect && props.selectedFocusMode === 'original'
+}
+
+function shouldAutoFocusSelectedNode(): boolean {
+  return props.dimUnselectedOnSelect && props.autoFocusSelectedEnabled
 }
 </script>

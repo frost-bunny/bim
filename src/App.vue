@@ -38,6 +38,9 @@
         :selected-node-id="selectedNodeId"
         :hovered-node-id="hoveredNodeId"
         :hover-highlight-enabled="hoverHighlightEnabled"
+        :dim-unselected-on-select="dimUnselectedOnSelect"
+        :selected-focus-mode="selectedFocusMode"
+        :auto-focus-selected-enabled="autoFocusSelectedEnabled"
         :hidden-node-ids="hiddenNodeIds"
         @select-node="selectNode"
         @hover-node="setHoveredNode"
@@ -126,6 +129,33 @@
           </span>
           <input v-model="hoverHighlightEnabled" type="checkbox" />
         </label>
+
+        <label class="setting-row">
+          <span>
+            <strong>选中聚焦</strong>
+            <small>点击选中后，其余模型透明显示</small>
+          </span>
+          <input v-model="dimUnselectedOnSelect" type="checkbox" />
+        </label>
+
+        <label class="setting-row">
+          <span>
+            <strong>选中样式</strong>
+            <small>聚焦开启时控制当前模型显示方式</small>
+          </span>
+          <select v-model="selectedFocusMode" class="setting-select">
+            <option value="highlight">高亮选中</option>
+            <option value="original">保持原色</option>
+          </select>
+        </label>
+
+        <label class="setting-row">
+          <span>
+            <strong>自动定位</strong>
+            <small>选中聚焦开启后，视角移动到选中模型</small>
+          </span>
+          <input v-model="autoFocusSelectedEnabled" type="checkbox" />
+        </label>
       </section>
 
       <section v-if="metadataError || viewerError" class="info-card error-card">
@@ -146,11 +176,15 @@ import type { MaterialGroup, ModelNodeItem } from './types/model'
 import { loadTilesetGroups } from './utils/tiles'
 
 const tilesetUrl = '/models/3d-tiles/tileset.json'
+// const tilesetUrl = '/models/3d-tiles.copy/tileset.json'
 
 const materialGroups = ref<MaterialGroup[]>([])
 const selectedNodeId = ref<string | null>(null)
 const hoveredNodeId = ref<string | null>(null)
 const hoverHighlightEnabled = ref(false)
+const dimUnselectedOnSelect = ref(false)
+const selectedFocusMode = ref<'highlight' | 'original'>('highlight')
+const autoFocusSelectedEnabled = ref(false)
 const hiddenNodeIds = ref<Set<string>>(new Set())
 const isMetadataLoading = ref(true)
 const isViewerReady = ref(false)
