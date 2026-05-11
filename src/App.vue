@@ -145,7 +145,7 @@ import TwinViewer from './components/TwinViewer.vue'
 import type { MaterialGroup, ModelNodeItem } from './types/model'
 import { loadModelGroups } from './utils/gltf'
 
-const modelUrl = '/models/bridge.glb'
+const modelUrl = '/models/t.glb'
 
 const materialGroups = ref<MaterialGroup[]>([])
 const selectedNodeId = ref<string | null>(null)

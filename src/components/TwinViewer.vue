@@ -50,9 +50,18 @@ let meshPickerPromise: Promise<MeshPicker> | null = null
 let hoverFrameId = 0
 let pendingHoverPosition: Cartesian2 | null = null
 let emittedHoverNodeId: string | null = null
+let lastStableHoverNodeId: string | null = null
+let lastStableHoverPosition: Cartesian2 | null = null
+let hoverCandidateNodeId: string | null = null
+let hoverCandidateFrameCount = 0
+let hoverMissCount = 0
 const visibleHighlightNodeId = ref<string | null>(null)
 const hiddenMainNodeId = ref<string | null>(null)
 const transparentNodeIds = ref<Set<string>>(new Set())
+
+const hoverMissClearFrameCount = 2
+const hoverSwitchConfirmFrameCount = 2
+const hoverSwitchMinPixelDistance = 8
 
 const nodeById = new Map<string, ModelNodeItem>()
 const nodeIdByName = new Map<string, string>()
@@ -99,7 +108,7 @@ watch(
   () => props.hoverHighlightEnabled,
   (enabled) => {
     if (!enabled) {
-      updateHoverNode(null)
+      clearHoverState()
     }
 
     syncHighlight(getActiveHighlightNodeId(), getActiveHighlightMode())
@@ -178,9 +187,9 @@ onMounted(async () => {
     highlightModel.lightColor = new Cartesian3(5.5, 5.5, 5.5)
     highlightModel.show = false
 
-    transparentModel.color = Color.fromCssColorString('#7dd3fc').withAlpha(0.22)
+    transparentModel.color = Color.fromCssColorString('#bde9ff').withAlpha(0.1)
     transparentModel.colorBlendMode = ColorBlendMode.REPLACE
-    transparentModel.silhouetteColor = Color.fromCssColorString('#7dd3fc').withAlpha(0.55)
+    transparentModel.silhouetteColor = Color.fromCssColorString('#bde9ff').withAlpha(0.35)
     transparentModel.silhouetteSize = 1.2
     transparentModel.lightColor = new Cartesian3(4.8, 4.8, 4.8)
     transparentModel.show = false
@@ -233,8 +242,8 @@ function installPickHandler(viewer: Viewer): void {
 
   handler.setInputAction((movement: { position: Cartesian2 }) => {
     const nodeId =
-      props.hoverHighlightEnabled && props.hoveredNodeId
-        ? props.hoveredNodeId
+      props.hoverHighlightEnabled && lastStableHoverNodeId
+        ? lastStableHoverNodeId
         : pickNode(viewer, movement.position)
 
     if (nodeId) {
@@ -247,7 +256,7 @@ function installPickHandler(viewer: Viewer): void {
   }, ScreenSpaceEventType.MOUSE_MOVE)
 
   const handleCanvasLeave = () => {
-    updateHoverNode(null)
+    clearHoverState()
   }
 
   viewer.scene.canvas.addEventListener('mouseleave', handleCanvasLeave)
@@ -327,7 +336,9 @@ function syncHighlight(nodeId: string | null, mode: 'selected' | 'hover'): void 
 
   modelNode.show = true
   setNodeVisible(transparentModelRef.value, nodeId, false)
-  hideMainNode(nodeId)
+  if (mode === 'selected') {
+    hideMainNode(nodeId)
+  }
   visibleHighlightNodeId.value = nodeId
   highlightModel.show = true
   viewerRef.value?.scene.requestRender()
@@ -378,7 +389,7 @@ async function ensureMeshPicker(): Promise<void> {
 }
 
 function pickNode(viewer: Viewer, position: Cartesian2): string | null {
-  return pickGpuNode(viewer, position) ?? pickPreciseNode(viewer, position)
+  return pickPreciseNode(viewer, position) ?? pickGpuNode(viewer, position)
 }
 
 function pickPreciseNode(viewer: Viewer, position: Cartesian2): string | null {
@@ -422,7 +433,7 @@ function pickGpuNode(viewer: Viewer, position: Cartesian2): string | null {
 
 function scheduleHoverPick(viewer: Viewer, position: Cartesian2): void {
   if (!props.hoverHighlightEnabled) {
-    updateHoverNode(null)
+    clearHoverState()
     return
   }
 
@@ -439,8 +450,79 @@ function scheduleHoverPick(viewer: Viewer, position: Cartesian2): void {
       return
     }
 
-    updateHoverNode(pickGpuNode(viewer, pendingHoverPosition))
+    updateStableHoverNode(pickHoverNode(viewer, pendingHoverPosition), pendingHoverPosition)
   })
+}
+
+function pickHoverNode(viewer: Viewer, position: Cartesian2): string | null {
+  return pickPreciseNode(viewer, position) ?? pickGpuNode(viewer, position)
+}
+
+function updateStableHoverNode(candidateNodeId: string | null, position: Cartesian2): void {
+  if (!candidateNodeId) {
+    hoverCandidateNodeId = null
+    hoverCandidateFrameCount = 0
+    hoverMissCount += 1
+
+    if (hoverMissCount >= hoverMissClearFrameCount) {
+      setStableHoverNode(null, position)
+    }
+
+    return
+  }
+
+  hoverMissCount = 0
+
+  if (!lastStableHoverNodeId || candidateNodeId === lastStableHoverNodeId) {
+    hoverCandidateNodeId = null
+    hoverCandidateFrameCount = 0
+    setStableHoverNode(candidateNodeId, position)
+    return
+  }
+
+  if (isWithinHoverSwitchDeadZone(position)) {
+    return
+  }
+
+  if (candidateNodeId === hoverCandidateNodeId) {
+    hoverCandidateFrameCount += 1
+  } else {
+    hoverCandidateNodeId = candidateNodeId
+    hoverCandidateFrameCount = 1
+  }
+
+  if (hoverCandidateFrameCount >= hoverSwitchConfirmFrameCount) {
+    setStableHoverNode(candidateNodeId, position)
+  }
+}
+
+function isWithinHoverSwitchDeadZone(position: Cartesian2): boolean {
+  if (!lastStableHoverPosition) {
+    return false
+  }
+
+  return Cartesian2.distance(position, lastStableHoverPosition) < hoverSwitchMinPixelDistance
+}
+
+function setStableHoverNode(nodeId: string | null, position: Cartesian2 | null): void {
+  lastStableHoverNodeId = nodeId
+  lastStableHoverPosition = position
+    ? Cartesian2.clone(position, lastStableHoverPosition ?? new Cartesian2())
+    : null
+  hoverCandidateNodeId = null
+  hoverCandidateFrameCount = 0
+  hoverMissCount = 0
+  updateHoverNode(nodeId)
+}
+
+function clearHoverState(): void {
+  lastStableHoverNodeId = null
+  lastStableHoverPosition = null
+  hoverCandidateNodeId = null
+  hoverCandidateFrameCount = 0
+  hoverMissCount = 0
+  pendingHoverPosition = null
+  updateHoverNode(null)
 }
 
 function updateHoverNode(nodeId: string | null): void {
@@ -473,9 +555,9 @@ function applyHighlightStyle(mode: 'selected' | 'hover'): void {
   }
 
   if (mode === 'hover') {
-    highlightModel.color = Color.fromCssColorString('#fff47a').withAlpha(0.86)
+    highlightModel.color = Color.fromCssColorString('#fff47a').withAlpha(0.2)
     highlightModel.silhouetteColor = Color.fromCssColorString('#18f3ff')
-    highlightModel.silhouetteSize = 2.1
+    highlightModel.silhouetteSize = 2.8
     return
   }
 
@@ -548,6 +630,10 @@ function hideVisibleHighlightNode(): void {
 
   if (modelNode) {
     modelNode.show = false
+  }
+
+  if (props.hiddenNodeIds.has(nodeId)) {
+    setNodeVisible(transparentModelRef.value, nodeId, true)
   }
 
   visibleHighlightNodeId.value = null
