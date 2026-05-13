@@ -161,6 +161,70 @@ button {
   inset: 0;
 }
 
+.model-info-popup {
+  position: absolute;
+  z-index: 4;
+  width: 260px;
+  border: 1px solid rgba(24, 243, 255, 0.38);
+  border-radius: 8px;
+  background: rgba(7, 17, 31, 0.86);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.36);
+  color: var(--text);
+  pointer-events: none;
+  backdrop-filter: blur(14px);
+}
+
+.model-info-popup::before {
+  position: absolute;
+  display: none;
+  bottom: 18px;
+  left: -6px;
+  width: 10px;
+  height: 10px;
+  border-left: 1px solid rgba(24, 243, 255, 0.38);
+  border-bottom: 1px solid rgba(24, 243, 255, 0.38);
+  background: rgba(7, 17, 31, 0.86);
+  content: "";
+  transform: rotate(45deg);
+}
+
+.model-info-popup__title {
+  overflow: hidden;
+  padding: 12px 13px 10px;
+  border-bottom: 1px solid rgba(148, 180, 214, 0.16);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 760;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-info-popup__grid {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 8px 10px;
+  padding: 12px 13px 13px;
+  align-items: center;
+}
+
+.model-info-popup__grid span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.model-info-popup__grid strong {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cesium-viewer,
 .cesium-viewer-cesiumWidgetContainer,
 .cesium-widget,

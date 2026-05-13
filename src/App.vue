@@ -41,6 +41,7 @@
         :dim-unselected-on-select="dimUnselectedOnSelect"
         :selected-focus-mode="selectedFocusMode"
         :auto-focus-selected-enabled="autoFocusSelectedEnabled"
+        :show-model-info-enabled="showModelInfoEnabled"
         :hidden-node-ids="hiddenNodeIds"
         @select-node="selectNode"
         @hover-node="setHoveredNode"
@@ -125,7 +126,7 @@
         <label class="setting-row">
           <span>
             <strong>&#24748;&#28014;&#39640;&#20142;</strong>
-            <small>&#40736;&#26631;&#31227;&#20837;&#26500;&#20214;&#26102;&#20020;&#26102;&#39640;&#20142;</small>
+            <small>鼠标移入构件时临时高亮，与选中聚焦互斥</small>
           </span>
           <input v-model="hoverHighlightEnabled" type="checkbox" />
         </label>
@@ -133,7 +134,7 @@
         <label class="setting-row">
           <span>
             <strong>选中聚焦</strong>
-            <small>点击选中后，其余模型透明显示</small>
+            <small>点击选中后，其余模型透明显示，与悬浮高亮互斥</small>
           </span>
           <input v-model="dimUnselectedOnSelect" type="checkbox" />
         </label>
@@ -155,6 +156,14 @@
             <small>选中聚焦开启后，视角移动到选中模型</small>
           </span>
           <input v-model="autoFocusSelectedEnabled" type="checkbox" />
+        </label>
+
+        <label class="setting-row">
+          <span>
+            <strong>展示模型信息</strong>
+            <small>点击模型后，在模型位置附近显示信息弹窗</small>
+          </span>
+          <input v-model="showModelInfoEnabled" type="checkbox" />
         </label>
       </section>
 
@@ -185,6 +194,7 @@ const hoverHighlightEnabled = ref(false)
 const dimUnselectedOnSelect = ref(false)
 const selectedFocusMode = ref<'highlight' | 'original'>('highlight')
 const autoFocusSelectedEnabled = ref(false)
+const showModelInfoEnabled = ref(false)
 const hiddenNodeIds = ref<Set<string>>(new Set())
 const isMetadataLoading = ref(true)
 const isViewerReady = ref(false)
@@ -252,7 +262,18 @@ function setHoveredNode(nodeId: string | null): void {
 }
 
 watch(hoverHighlightEnabled, (enabled) => {
+  if (enabled && dimUnselectedOnSelect.value) {
+    dimUnselectedOnSelect.value = false
+  }
+
   if (!enabled) {
+    hoveredNodeId.value = null
+  }
+})
+
+watch(dimUnselectedOnSelect, (enabled) => {
+  if (enabled && hoverHighlightEnabled.value) {
+    hoverHighlightEnabled.value = false
     hoveredNodeId.value = null
   }
 })
