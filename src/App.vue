@@ -184,7 +184,8 @@ import TwinViewer from './components/TwinViewer.vue'
 import type { MaterialGroup, ModelNodeItem } from './types/model'
 import { loadTilesetGroups } from './utils/tiles'
 
-const tilesetUrl = '/models/3d-tiles/tileset.json'
+// const tilesetUrl = '/models/3d-tiles/tileset.json'
+const tilesetUrl = '/models/bridge/tileset.json'
 // const tilesetUrl = '/models/3d-tiles.copy/tileset.json'
 
 const materialGroups = ref<MaterialGroup[]>([])
