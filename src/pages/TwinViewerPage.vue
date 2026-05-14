@@ -32,7 +32,7 @@
     </aside>
 
     <section class="viewer-panel">
-      <TwinViewer
+      <TilesCopyViewer
         :tileset-url="tilesetUrl"
         :nodes="allNodes"
         :selected-node-id="selectedNodeId"
@@ -42,11 +42,13 @@
         :selected-focus-mode="selectedFocusMode"
         :auto-focus-selected-enabled="autoFocusSelectedEnabled"
         :show-model-info-enabled="showModelInfoEnabled"
+        :model-background-mode="modelBackgroundMode"
         :hidden-node-ids="hiddenNodeIds"
         @select-node="selectNode"
         @hover-node="setHoveredNode"
         @ready="isViewerReady = true"
         @error="viewerError = $event"
+        @standard-report="tilesetStandardReport = $event"
       />
 
       <div class="scene-status" :class="{ ready: isViewerReady }">
@@ -120,6 +122,31 @@
 
       <section class="info-card">
         <div class="panel-heading">
+          <span>{{ tilesetStandardTitle }}</span>
+        </div>
+
+        <div class="summary-grid">
+          <div>
+            <span>{{ labelTilesetVersion }}</span>
+            <strong>{{ tilesetStandardReport?.assetVersion || '-' }}</strong>
+          </div>
+          <div>
+            <span>{{ labelTileContent }}</span>
+            <strong>{{ tilesetStandardReport?.contentCount ?? '-' }}</strong>
+          </div>
+          <div>
+            <span>{{ labelMissingContent }}</span>
+            <strong>{{ tilesetStandardReport?.missingContentUris.length ?? '-' }}</strong>
+          </div>
+          <div>
+            <span>{{ labelGltfContent }}</span>
+            <strong>{{ tilesetGltfContentText }}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="info-card">
+        <div class="panel-heading">
           <span>&#20132;&#20114;&#37197;&#32622;</span>
         </div>
 
@@ -165,6 +192,20 @@
           </span>
           <input v-model="showModelInfoEnabled" type="checkbox" />
         </label>
+
+        <label class="setting-row">
+          <span>
+            <strong>场景背景</strong>
+            <small>纯色背景会关闭星空，地球定位会显示模型所在经纬度</small>
+          </span>
+          <select v-model="modelBackgroundMode" class="setting-select">
+            <option value="dark">经典深色</option>
+            <option value="blueprint">蓝图深色</option>
+            <option value="slate">中性灰蓝</option>
+            <option value="light">浅色背景</option>
+            <option value="earth">地球定位</option>
+          </select>
+        </label>
       </section>
 
       <section v-if="metadataError || viewerError" class="info-card error-card">
@@ -180,13 +221,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import ModelTree from './components/ModelTree.vue'
-import TwinViewer from './components/TwinViewer.vue'
+import TilesCopyViewer from './components/TilesCopyViewer.vue'
 import type { MaterialGroup, ModelNodeItem } from './types/model'
+import { loadModelGroups } from './utils/gltf'
 import { loadTilesetGroups } from './utils/tiles'
+import type { TilesetStandardReport } from './utils/tilesetValidation'
 
-const tilesetUrl = '/models/3d-tiles/tileset.json'
+// const tilesetUrl = '/models/3d-tiles/tileset.json'
+// const tilesetUrl = '/models/bridge.glb' // 3D Tiles 转换后的 glTF 模型
 // const tilesetUrl = '/models/bridge/tileset.json'
-// const tilesetUrl = '/models/3d-tiles.copy/tileset.json'
+const tilesetUrl = '/models/3d-tiles.copy/tileset.json'
 
 const materialGroups = ref<MaterialGroup[]>([])
 const selectedNodeId = ref<string | null>(null)
@@ -196,11 +240,14 @@ const dimUnselectedOnSelect = ref(false)
 const selectedFocusMode = ref<'highlight' | 'original'>('highlight')
 const autoFocusSelectedEnabled = ref(false)
 const showModelInfoEnabled = ref(false)
+const modelBackgroundMode = ref<'blueprint' | 'dark' | 'slate' | 'light' | 'earth'>('dark')
 const hiddenNodeIds = ref<Set<string>>(new Set())
 const isMetadataLoading = ref(true)
 const isViewerReady = ref(false)
 const metadataError = ref('')
 const viewerError = ref('')
+const unavailableContentUris = ref<string[]>([])
+const tilesetStandardReport = ref<TilesetStandardReport | null>(null)
 
 const allNodes = computed(() => materialGroups.value.flatMap((group) => group.children))
 
@@ -235,6 +282,31 @@ const sceneStatusText = computed(() => {
 
   return selectedInfo.value ? `\u5df2\u9009\u4e2d ${selectedInfo.value.name}` : '\u6a21\u578b\u5df2\u5c31\u7eea'
 })
+
+const tilesetStandardTitle = computed(() => {
+  if (!tilesetStandardReport.value) {
+    return '\u6807\u51c6\u5224\u65ad'
+  }
+
+  return tilesetStandardReport.value.isStandard3DTiles11
+    ? '\u6807\u51c6\u5224\u65ad\uff1a\u901a\u8fc7'
+    : '\u6807\u51c6\u5224\u65ad\uff1a\u9700\u4fee\u590d'
+})
+
+const tilesetGltfContentText = computed(() => {
+  if (!tilesetStandardReport.value) {
+    return '-'
+  }
+
+  return tilesetStandardReport.value.usesGltfContentExtension
+    ? '3DTILES_content_gltf'
+    : '\u672a\u58f0\u660e'
+})
+
+const labelTilesetVersion = '\u7248\u672c'
+const labelTileContent = 'Content'
+const labelMissingContent = '\u7f3a\u5931\u6587\u4ef6'
+const labelGltfContent = 'glTF Content'
 
 function selectNode(nodeId: string): void {
   hoveredNodeId.value = null
@@ -281,11 +353,27 @@ watch(dimUnselectedOnSelect, (enabled) => {
 
 onMounted(async () => {
   try {
-    materialGroups.value = await loadTilesetGroups(tilesetUrl)
+    unavailableContentUris.value = []
+    materialGroups.value = isGltfModelUrl(tilesetUrl)
+      ? await loadModelGroups(tilesetUrl)
+      : await loadTilesetGroups(tilesetUrl, {
+        ignoreUnavailableContent: true,
+        onUnavailableContent: (url) => {
+          unavailableContentUris.value.push(url.pathname.split('/').pop() ?? url.pathname)
+        }
+      })
+
+    if (unavailableContentUris.value.length > 0) {
+      metadataError.value = `\u5df2\u8df3\u8fc7 ${unavailableContentUris.value.length} \u4e2a\u7f3a\u5931\u7684 tile content\uff1a${unavailableContentUris.value.join(', ')}`
+    }
   } catch (error) {
     metadataError.value = error instanceof Error ? error.message : '\u6a21\u578b\u76ee\u5f55\u89e3\u6790\u5931\u8d25'
   } finally {
     isMetadataLoading.value = false
   }
 })
+
+function isGltfModelUrl(url: string): boolean {
+  return /\.(glb|gltf)(?:[?#].*)?$/i.test(url)
+}
 </script>

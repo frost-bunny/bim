@@ -62,6 +62,11 @@ interface TileFeatureRecord {
   primitiveCount: number
 }
 
+interface LoadTilesetGroupsOptions {
+  ignoreUnavailableContent?: boolean
+  onUnavailableContent?: (url: URL, error: unknown) => void
+}
+
 const GLB_MAGIC = 'glTF'
 const B3DM_MAGIC = 'b3dm'
 const CMPT_MAGIC = 'cmpt'
@@ -69,7 +74,10 @@ const JSON_CHUNK_TYPE = 0x4e4f534a
 const BIN_CHUNK_TYPE = 0x004e4942
 const decoder = new TextDecoder('utf-8')
 
-export async function loadTilesetGroups(tilesetUrl: string): Promise<MaterialGroup[]> {
+export async function loadTilesetGroups(
+  tilesetUrl: string,
+  options: LoadTilesetGroupsOptions = {}
+): Promise<MaterialGroup[]> {
   const response = await fetch(tilesetUrl)
 
   if (!response.ok) {
@@ -79,7 +87,9 @@ export async function loadTilesetGroups(tilesetUrl: string): Promise<MaterialGro
   const tileset = (await response.json()) as TilesetDocument
   const contentUrls = collectContentUrls(tileset.root, new URL(tilesetUrl, window.location.href))
   const records = (
-    await Promise.all(contentUrls.map((url, tileIndex) => loadTileRecords(url, tileIndex)))
+    await Promise.all(
+      contentUrls.map((url, tileIndex) => loadTileRecords(url, tileIndex, options))
+    )
   ).flat()
 
   return buildGroups(records)
@@ -104,14 +114,46 @@ function collectContentUrls(tile: TilesetTile | undefined, baseUrl: URL): URL[] 
   return urls
 }
 
-async function loadTileRecords(url: URL, tileIndex: number): Promise<TileFeatureRecord[]> {
-  const response = await fetch(url)
+async function loadTileRecords(
+  url: URL,
+  tileIndex: number,
+  options: LoadTilesetGroupsOptions
+): Promise<TileFeatureRecord[]> {
+  let response: Response
+
+  try {
+    response = await fetch(url)
+  } catch (error) {
+    if (options.ignoreUnavailableContent) {
+      options.onUnavailableContent?.(url, error)
+      return []
+    }
+
+    throw error
+  }
 
   if (!response.ok) {
+    if (options.ignoreUnavailableContent) {
+      options.onUnavailableContent?.(
+        url,
+        new Error(`${response.status} ${response.statusText}`)
+      )
+      return []
+    }
+
     throw new Error(`Failed to load tile metadata ${url.pathname}: ${response.status} ${response.statusText}`)
   }
 
-  return parseTileRecords(await response.arrayBuffer(), getTileName(url), tileIndex)
+  try {
+    return parseTileRecords(await response.arrayBuffer(), getTileName(url), tileIndex)
+  } catch (error) {
+    if (options.ignoreUnavailableContent) {
+      options.onUnavailableContent?.(url, error)
+      return []
+    }
+
+    throw error
+  }
 }
 
 function parseTileRecords(buffer: ArrayBuffer, tileName: string, tileIndex: number): TileFeatureRecord[] {
@@ -128,6 +170,10 @@ function parseTileRecords(buffer: ArrayBuffer, tileName: string, tileIndex: numb
 
   if (magic === CMPT_MAGIC) {
     return parseCmptRecords(bytes, tileName, tileIndex)
+  }
+
+  if (/\.(?:glb|gltf|b3dm|cmpt)$/i.test(tileName)) {
+    throw new Error(`Invalid 3D Tiles content ${tileName}`)
   }
 
   return [createFallbackRecord(tileName, tileIndex, 0)]

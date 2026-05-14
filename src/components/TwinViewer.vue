@@ -1,10 +1,7 @@
 <template>
   <div ref="containerRef" class="cesium-host">
-    <div
-      v-if="selectedModelInfo && modelInfoPopup.visible"
-      class="model-info-popup"
-      :style="{ left: `${modelInfoPopup.x}px`, top: `${modelInfoPopup.y}px` }"
-    >
+    <div v-if="selectedModelInfo && modelInfoPopup.visible" class="model-info-popup"
+      :style="{ left: `${modelInfoPopup.x}px`, top: `${modelInfoPopup.y}px` }">
       <div class="model-info-popup__title">{{ selectedModelInfo.name }}</div>
       <div class="model-info-popup__grid">
         <span>节点索引</span>
@@ -24,6 +21,7 @@
 import {
   Axis,
   BoundingSphere,
+  CameraEventType,
   Cartesian2,
   Cartesian3,
   Cesium3DTileFeature,
@@ -32,6 +30,7 @@ import {
   Color,
   EllipsoidTerrainProvider,
   HeadingPitchRange,
+  KeyboardEventModifier,
   SceneTransforms,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
@@ -69,6 +68,7 @@ const handlerRef = shallowRef<ScreenSpaceEventHandler | null>(null)
 
 // Cesium 的事件监听需要手动卸载，组件销毁时会统一调用这些清理函数。
 let removeCanvasLeaveListener: (() => void) | null = null
+let removeCanvasContextMenuListener: (() => void) | null = null
 let removeTileVisibleListener: (() => void) | null = null
 let removeTileUnloadListener: (() => void) | null = null
 let removePostRenderListener: (() => void) | null = null
@@ -263,14 +263,14 @@ onMounted(async () => {
 
     viewerRef.value = viewer
     removePostRenderListener = viewer.scene.postRender.addEventListener(updateSelectedInfoPopup)
-    viewer.resolutionScale = 0.82
+    viewer.resolutionScale = Math.min(window.devicePixelRatio, 2)
     viewer.scene.globe.show = false
     if (viewer.scene.skyAtmosphere) {
       viewer.scene.skyAtmosphere.show = false
     }
     viewer.scene.backgroundColor = Color.fromCssColorString('#07111f')
-    viewer.scene.screenSpaceCameraController.enableCollisionDetection = false
-    ;(viewer.cesiumWidget.creditContainer as HTMLElement).style.display = 'none'
+    configureCameraControls(viewer)
+      ; (viewer.cesiumWidget.creditContainer as HTMLElement).style.display = 'none'
 
     // 示例模型没有真实地理定位时，需要给 tileset 一个固定的世界坐标基准。
     const tilesetModelMatrix = Transforms.eastNorthUpToFixedFrame(
@@ -322,6 +322,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   removeCanvasLeaveListener?.()
+  removeCanvasContextMenuListener?.()
   removeTileVisibleListener?.()
   removeTileUnloadListener?.()
   removePostRenderListener?.()
@@ -363,7 +364,37 @@ function installPickHandler(viewer: Viewer): void {
 
   viewer.scene.canvas.addEventListener('mouseleave', handleCanvasLeave)
   removeCanvasLeaveListener = () => viewer.scene.canvas.removeEventListener('mouseleave', handleCanvasLeave)
+
+  const handleCanvasContextMenu = (event: MouseEvent) => {
+    event.preventDefault()
+  }
+
+  viewer.scene.canvas.addEventListener('contextmenu', handleCanvasContextMenu)
+  removeCanvasContextMenuListener = () => viewer.scene.canvas.removeEventListener('contextmenu', handleCanvasContextMenu)
   handlerRef.value = handler
+}
+
+function configureCameraControls(viewer: Viewer): void {
+  const controller = viewer.scene.screenSpaceCameraController
+
+  controller.enableCollisionDetection = false
+  controller.zoomEventTypes = [
+    CameraEventType.WHEEL,
+    CameraEventType.PINCH
+  ]
+  controller.tiltEventTypes = [
+    CameraEventType.MIDDLE_DRAG,
+    CameraEventType.PINCH,
+    CameraEventType.RIGHT_DRAG,
+    {
+      eventType: CameraEventType.LEFT_DRAG,
+      modifier: KeyboardEventModifier.CTRL
+    },
+    {
+      eventType: CameraEventType.RIGHT_DRAG,
+      modifier: KeyboardEventModifier.CTRL
+    }
+  ]
 }
 
 function installTileLifecycleHandlers(tileset: Cesium3DTileset): void {
@@ -988,8 +1019,8 @@ function applyContentStyle(content: TileContentTarget, nodeId: string): void {
 function shouldDimUnselectedNode(nodeId: string): boolean {
   return Boolean(
     props.dimUnselectedOnSelect &&
-      props.selectedNodeId &&
-      nodeId !== props.selectedNodeId
+    props.selectedNodeId &&
+    nodeId !== props.selectedNodeId
   )
 }
 
