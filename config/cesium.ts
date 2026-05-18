@@ -1,0 +1,3 @@
+export const CesiumConfig = {
+    token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIzNzMyNDBhYi0yYzM2LTQxMDgtODZkOS0wMDUwYTg5NzNkMjAiLCJpZCI6NDE4NDc0LCJpYXQiOjE3NzYyNDE0NzF9.5ODx9PkiP0f77kLRMli8osTfU7iTU6REAc52y7JgGSg'
+} as const;

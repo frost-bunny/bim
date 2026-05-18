@@ -29,13 +29,16 @@ import {
   Cesium3DTileset,
   Color,
   EllipsoidTerrainProvider,
+  CesiumTerrainProvider,
+  IonResource,
   HeadingPitchRange,
   KeyboardEventModifier,
   SceneTransforms,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   Transforms,
-  Viewer
+  Viewer,
+  Terrain
 } from 'cesium'
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import type { ModelNodeItem } from '../types/model'
@@ -245,6 +248,7 @@ onMounted(async () => {
     // 只保留三维模型本身需要的 Cesium 功能，关闭默认 UI，页面上的控制由 Vue 组件负责。
     const viewer = new Viewer(containerRef.value, {
       animation: false,
+      // terrain: Terrain.fromWorldTerrain(),
       baseLayer: false,
       baseLayerPicker: false,
       fullscreenButton: false,
@@ -255,7 +259,6 @@ onMounted(async () => {
       selectionIndicator: false,
       timeline: false,
       navigationHelpButton: false,
-      terrainProvider: new EllipsoidTerrainProvider(),
       requestRenderMode: true,
       maximumRenderTimeChange: Number.POSITIVE_INFINITY,
       shouldAnimate: false
@@ -279,7 +282,7 @@ onMounted(async () => {
 
     const tileset = await Cesium3DTileset.fromUrl(props.tilesetUrl, {
       // 下方参数主要控制 3D Tiles 的加载精度、缓存和渐进加载策略。
-      maximumScreenSpaceError: 12,
+      maximumScreenSpaceError: 2,
       modelMatrix: tilesetModelMatrix,
       // modelUpAxis: Axis.Z,
       dynamicScreenSpaceError: true,
