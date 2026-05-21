@@ -1,5 +1,5 @@
 <template>
-  <component :is="GisPage"/>
+  <component :is="TwinViewerPage"/>
 </template>
 
 <script setup lang="ts">

@@ -71,15 +71,14 @@ function configureCameraControls(): void {
     const { CameraEventType, KeyboardEventModifier } = Cesium;
     const controller = viewer.scene.screenSpaceCameraController
 
-    // 清除左键的旋转事件
     controller.rotateEventTypes = [
         CameraEventType.RIGHT_DRAG,
         {
             eventType: CameraEventType.LEFT_DRAG,
-            modifier: KeyboardEventModifier.SHIFT  // 或配合 Shift 键
+            modifier: KeyboardEventModifier.SHIFT,
         }
     ]
-    // 将左键映射为平移
+
     controller.lookEventTypes = [
         CameraEventType.LEFT_DRAG,
     ]
@@ -89,6 +88,7 @@ onMounted(() => {
     createModel(tilesetUrl, tilesetHeight);
 })
 </script>
+
 <style scoped>
 .cesium-container {
     width: 100%;

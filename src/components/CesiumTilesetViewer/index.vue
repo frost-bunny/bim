@@ -128,7 +128,7 @@ let handler: Cesium.ScreenSpaceEventHandler | null = null
 let hoveredFeature: Cesium.Cesium3DTileFeature | null = null
 let selectedFeature: Cesium.Cesium3DTileFeature | null = null
 
-const originalColors = new WeakMap<Cesium.Cesium3DTileFeature, Cesium.Color>()
+let originalColors = new WeakMap<Cesium.Cesium3DTileFeature, Cesium.Color>()
 
 onMounted(() => {
   initCesium()
@@ -176,13 +176,7 @@ async function initCesium() {
     infoBox: false,
     selectionIndicator: false,
     shouldAnimate: true,
-    baseLayer: props.showBaseLayer
-      ? undefined
-      : Cesium.ImageryLayer.fromProviderAsync(
-          Promise.resolve(new Cesium.TileMapServiceImageryProvider({
-            url: Cesium.buildModuleUrl('Assets/Textures/NaturalEarthII')
-          }))
-        )
+    baseLayer: props.showBaseLayer ? undefined : false
   })
 
   viewer.scene.backgroundColor = props.backgroundColor
@@ -229,8 +223,6 @@ async function loadTileset() {
       applyTilesetTransform(tileset, props.transform)
     }
 
-    await tileset.readyPromise
-
     if (props.flyTo) {
       await viewer.flyTo(tileset, {
         duration: 1.5
@@ -257,7 +249,7 @@ async function reloadTileset() {
 
   hoveredFeature = null
   selectedFeature = null
-  originalColors.clear?.()
+  originalColors = new WeakMap<Cesium.Cesium3DTileFeature, Cesium.Color>()
 
   await loadTileset()
 }
